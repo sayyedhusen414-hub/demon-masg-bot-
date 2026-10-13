@@ -17,8 +17,6 @@ from telegram.ext import (
     filters,
 )
 
-# ---------------- CONFIG ----------------
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -29,7 +27,6 @@ BOT_USERNAME = "Demon_secretarybot"
 COOLDOWN_SECONDS = 60
 MANUAL_PAUSE_SECONDS = 600
 
-# These sets are stored in memory and reset on restart.
 already_replied = set()
 cooldown_until = {}
 manual_pause_until = {}
@@ -37,15 +34,14 @@ reply_lock = set()
 
 
 def get_config():
-    required = [
+    keys = [
         "API_ID",
         "API_HASH",
         "SESSION_STRING",
         "BOT_TOKEN",
         "OWNER_ID",
     ]
-
-    missing = [key for key in required if not os.getenv(key)]
+    missing = [key for key in keys if not os.getenv(key)]
     if missing:
         raise RuntimeError(
             "Missing environment variables: " + ", ".join(missing)
@@ -65,8 +61,7 @@ def get_config():
         ) from exc
 
 
-# ---------------- RENDER HEALTH CHECK ----------------
-
+# Render health check
 web = Flask(__name__)
 
 
@@ -90,15 +85,30 @@ def run_web():
     )
 
 
-# ---------------- BOT COMMANDS ----------------
-
+# BotFather bot: owner-only access
 async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    # No extra welcome or format warning.
-    # Users can send @username | message to contact the owner.
-    return
+    user = update.effective_user
+    message = update.effective_message
+
+    if not user or not message:
+        return
+
+    if user.id != context.bot_data["owner_id"]:
+        await message.reply_text(
+            "🌑 I am nothing but my master's loyal servant. 🖤\n\n"
+            "I exist only to serve him. Only my master has "
+            "the authority to use me. ⚔️"
+        )
+        return
+
+    await message.reply_text(
+        "🌑 I am nothing but my master's loyal servant. 🖤\n\n"
+        "I exist only to serve him. Only my master has "
+        "the authority to use me. ⚔️"
+    )
 
 
 async def receive_message(
@@ -111,51 +121,17 @@ async def receive_message(
     if not message or not user or not message.text:
         return
 
-    # Do not process the owner's own messages.
-    if user.id == context.bot_data["owner_id"]:
+    # Block everyone except the owner from using the bot.
+    if user.id != context.bot_data["owner_id"]:
         return
 
-    text = message.text.strip()
-
-    # Only forward correctly formatted submissions.
-    # Ignore all other messages silently.
-    if "|" not in text:
-        return
-
-    recipient, content = text.split("|", 1)
-    recipient = recipient.strip()
-    content = content.strip()
-
-    if (
-        not recipient.startswith("@")
-        or not content
-        or len(recipient) < 2
-    ):
-        return
-
-    username = f"@{user.username}" if user.username else "No username"
-
-    forwarded_text = (
-        "🌑 NEW MESSAGE\n\n"
-        f"From: {user.full_name}\n"
-        f"Username: {username}\n"
-        f"User ID: {user.id}\n"
-        f"To: {recipient}\n\n"
-        f"Message:\n{content}"
-    )
-
-    try:
-        await context.bot.send_message(
-            chat_id=context.bot_data["owner_id"],
-            text=forwarded_text,
-        )
-        # No success confirmation is sent to the user.
-    except Exception:
-        logger.exception("Could not forward submitted message")
+    # The owner can use the bot, but it should not forward
+    # the owner's own messages back to the owner.
+    # Add any owner-only commands or actions below this check.
+    return
 
 
-# ---------------- MAIN ACCOUNT AUTO-REPLY ----------------
-
+# Personal account: one fixed auto-reply per private chat
 async def main():
     config = get_config()
 
@@ -189,20 +165,18 @@ async def main():
     try:
         logger.info("Connecting personal Telegram account...")
         await client.start()
-
         account = await client.get_me()
-        logger.info("Personal Telegram account connected.")
 
         bot_info = await application.bot.get_me()
+        logger.info("Personal account connected.")
         logger.info("Bot connected: @%s", bot_info.username)
 
         if (bot_info.username or "").lower() != BOT_USERNAME.lower():
             raise RuntimeError(
-                f"Wrong bot token. Expected @{BOT_USERNAME}, "
+                f"Wrong bot token: expected @{BOT_USERNAME}, "
                 f"got @{bot_info.username}."
             )
 
-        # Only one fixed auto-reply per private chat.
         @client.on(events.NewMessage(incoming=True))
         async def on_incoming(event):
             if not event.is_private or not event.raw_text:
@@ -212,7 +186,6 @@ async def main():
 
             if not sender or getattr(sender, "bot", False):
                 return
-
             if sender.id == account.id:
                 return
 
@@ -221,24 +194,18 @@ async def main():
 
             if chat_id in already_replied:
                 return
-
             if manual_pause_until.get(chat_id, 0) > now:
                 return
-
             if cooldown_until.get(chat_id, 0) > now:
                 return
-
             if chat_id in reply_lock:
                 return
 
             reply_lock.add(chat_id)
-
-            # Mark before sending so repeated incoming messages
-            # cannot trigger repeated replies.
             already_replied.add(chat_id)
             cooldown_until[chat_id] = now + COOLDOWN_SECONDS
 
-            fixed_reply = (
+            reply = (
                 "🌑 Hello user, I am Demon Secretary Bot.\n\n"
                 "My master won't be around for a few days "
                 "because he has gone away.\n\n"
@@ -248,24 +215,21 @@ async def main():
             )
 
             try:
-                await event.reply(fixed_reply)
-                logger.info("Sent one auto-reply to a private chat.")
+                await event.reply(reply)
             except Exception:
                 logger.exception("Auto-reply failed")
             finally:
                 reply_lock.discard(chat_id)
 
-        # When you manually message a person, pause automation
-        # for that chat so it doesn't interrupt your conversation.
         @client.on(events.NewMessage(outgoing=True))
         async def on_manual_message(event):
             if not event.is_private or not event.raw_text:
                 return
 
-            chat_id = event.chat_id
-            manual_pause_until[chat_id] = (
-                time.monotonic() + MANUAL_PAUSE_SECONDS
-            )
+            if event.chat_id not in reply_lock:
+                manual_pause_until[event.chat_id] = (
+                    time.monotonic() + MANUAL_PAUSE_SECONDS
+                )
 
         await application.initialize()
         await application.start()
@@ -285,13 +249,10 @@ async def main():
     finally:
         if application.updater and application.updater.running:
             await application.updater.stop()
-
         if application.running:
             await application.stop()
-
         if client.is_connected():
             await client.disconnect()
-
         if application._initialized:
             await application.shutdown()
 
