@@ -9,13 +9,9 @@ from flask import Flask
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ---------------- CONFIG ----------------
+# ---------- CONFIG ----------
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
@@ -37,16 +33,19 @@ LOYALTY_MESSAGE = (
     "to use me. ⚔️"
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 web_app = Flask(__name__)
 
-# Store last reply time per private chat
+# One reply per chat per 24 hours (resets on restart)
 last_replied = {}
 
 
-# ---------------- RENDER HEALTH CHECK ----------------
+# ---------- RENDER HEALTH CHECK ----------
 
 @web_app.route("/")
 def home():
@@ -67,7 +66,7 @@ def run_web_server():
     )
 
 
-# ---------------- BOTFATHER BOT ----------------
+# ---------- BOTFATHER /START ----------
 
 async def start_command(
     update: Update,
@@ -77,16 +76,20 @@ async def start_command(
         await update.effective_message.reply_text(LOYALTY_MESSAGE)
 
 
-# ---------------- PERSONAL ACCOUNT AUTO-REPLY ----------------
+# ---------- PERSONAL ACCOUNT AUTO-REPLY ----------
 
 async def handle_private_message(event):
     try:
-        # Only incoming private messages
-        if not event.is_private or not event.is_incoming:
+        if not event.is_private:
             return
 
-        # Ignore Telegram bot accounts
+        # Ignore messages sent by your own account
+        if not event.is_incoming:
+            return
+
         sender = await event.get_sender()
+
+        # Ignore bots
         if not sender or getattr(sender, "bot", False):
             return
 
@@ -94,26 +97,35 @@ async def handle_private_message(event):
         now = time.time()
         previous_time = last_replied.get(chat_id, 0)
 
-        # One auto-reply per chat every 24 hours
+        # Reply once per chat every 24 hours
         if now - previous_time < COOLDOWN_SECONDS:
+            logger.info(
+                "Cooldown active for chat %s",
+                chat_id,
+            )
             return
 
-        # Set cooldown before sending to avoid duplicate replies
-        last_replied[chat_id] = now
+        # Set cooldown only after a successful send
+        await event.respond(AUTO_REPLY)
+        last_replied[chat_id] = time.time()
 
-        await event.reply(AUTO_REPLY)
-        logger.info("Auto-reply sent to private chat %s", chat_id)
+        logger.info(
+            "Auto-reply sent successfully to chat %s",
+            chat_id,
+        )
 
     except Exception:
-        logger.exception("Failed to process incoming message")
+        logger.exception("Personal DM auto-reply failed")
 
 
-# ---------------- START EVERYTHING ----------------
+# ---------- MAIN ----------
 
 async def main():
     # BotFather bot
     bot_app = Application.builder().token(BOT_TOKEN).build()
-    bot_app.add_handler(CommandHandler("start", start_command))
+    bot_app.add_handler(
+        CommandHandler("start", start_command)
+    )
 
     # Personal Telegram account
     user_client = TelegramClient(
@@ -124,18 +136,25 @@ async def main():
 
     await user_client.start()
 
+    me = await user_client.get_me()
+    logger.info(
+        "Personal Telegram account connected: ID %s",
+        me.id,
+    )
+
+    # Register incoming private message handler
+    user_client.add_event_handler(
+        handle_private_message,
+        events.NewMessage(incoming=True),
+    )
+
     await bot_app.initialize()
     await bot_app.start()
 
     if bot_app.updater is None:
-        raise RuntimeError("Telegram polling updater is unavailable")
+        raise RuntimeError("Telegram polling updater unavailable")
 
     await bot_app.updater.start_polling()
-
-    user_client.add_event_handler(
-        handle_private_message,
-        events.NewMessage(incoming=True, func=lambda event: event.is_private),
-    )
 
     logger.info("Demon Secretary Bot started successfully.")
 
@@ -155,4 +174,3 @@ if __name__ == "__main__":
     ).start()
 
     asyncio.run(main())
- 
