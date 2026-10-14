@@ -11,26 +11,26 @@ from telethon.sessions import StringSession
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ---------- CONFIG ----------
+# ========== CONFIG ==========
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 STRING_SESSION = os.environ["STRING_SESSION"]
 
-COOLDOWN_SECONDS = 24 * 60 * 60
-
-AUTO_REPLY = (
-    "🌑 Hello user, I am Demon Secretary Bot.\n\n"
-    "My master won't be around for a few days because he has gone away.\n\n"
-    "If you want to talk to him, message @Demon_secretarybot. "
-    "I'll deliver your message to him. 🖤"
-)
+OWNER_ID = 8344335776
+COOLDOWN = 24 * 60 * 60
 
 LOYALTY_MESSAGE = (
     "🌑 I am nothing but my master's loyal servant. 🖤\n\n"
     "I exist only to serve him. Only my master has the authority "
     "to use me. ⚔️"
+)
+
+AUTO_REPLY = (
+    "🌑 Hello, I am busy right now.\n\n"
+    "My master is currently unavailable. "
+    "Please try again later. 🖤"
 )
 
 logging.basicConfig(
@@ -39,138 +39,177 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-web_app = Flask(__name__)
+web = Flask(__name__)
 
-# One reply per chat per 24 hours (resets on restart)
+auto_reply_enabled = False
 last_replied = {}
 
 
-# ---------- RENDER HEALTH CHECK ----------
+# ========== RENDER HEALTH CHECK ==========
 
-@web_app.route("/")
+@web.route("/")
 def home():
-    return "Demon Secretary Bot is running.", 200
+    return "Demon Secretary is running!", 200
 
 
-@web_app.route("/health")
+@web.route("/health")
 def health():
     return "OK", 200
 
 
-def run_web_server():
-    port = int(os.environ.get("PORT", "10000"))
-    web_app.run(
+def run_web():
+    web.run(
         host="0.0.0.0",
-        port=port,
+        port=int(os.environ.get("PORT", "10000")),
         use_reloader=False,
     )
 
 
-# ---------- BOTFATHER /START ----------
+# ========== BOT COMMANDS ==========
 
-async def start_command(
+async def start_cmd(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    if update.effective_message:
-        await update.effective_message.reply_text(LOYALTY_MESSAGE)
+    global auto_reply_enabled
+
+    user = update.effective_user
+    if not user or not update.effective_message:
+        return
+
+    await update.effective_message.reply_text(LOYALTY_MESSAGE)
+
+    if user.id == OWNER_ID:
+        auto_reply_enabled = True
+        await update.effective_message.reply_text(
+            "✅ Personal DM auto-reply is ON."
+        )
 
 
-# ---------- PERSONAL ACCOUNT AUTO-REPLY ----------
+async def stop_cmd(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    global auto_reply_enabled
 
-async def handle_private_message(event):
+    user = update.effective_user
+    if not user or not update.effective_message:
+        return
+
+    if user.id != OWNER_ID:
+        await update.effective_message.reply_text(
+            "⛔ Only my master can use this command."
+        )
+        return
+
+    auto_reply_enabled = False
+    await update.effective_message.reply_text(
+        "🛑 Auto-reply is OFF. You can chat freely."
+    )
+
+
+async def on_cmd(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    global auto_reply_enabled
+
+    user = update.effective_user
+    if not user or not update.effective_message:
+        return
+
+    if user.id != OWNER_ID:
+        await update.effective_message.reply_text(
+            "⛔ Only my master can use this command."
+        )
+        return
+
+    auto_reply_enabled = True
+    await update.effective_message.reply_text(
+        "🌑 Auto-reply is ON again. 🖤"
+    )
+
+
+# ========== PERSONAL TELEGRAM DM HANDLER ==========
+
+async def handle_dm(event):
     try:
-        if not event.is_private:
+        if not event.is_private or not event.is_incoming:
             return
 
-        # Ignore messages sent by your own account
-        if not event.is_incoming:
+        if not auto_reply_enabled:
             return
 
         sender = await event.get_sender()
 
-        # Ignore bots
         if not sender or getattr(sender, "bot", False):
             return
 
         chat_id = event.chat_id
         now = time.time()
-        previous_time = last_replied.get(chat_id, 0)
+        previous = last_replied.get(chat_id, 0)
 
-        # Reply once per chat every 24 hours
-        if now - previous_time < COOLDOWN_SECONDS:
-            logger.info(
-                "Cooldown active for chat %s",
-                chat_id,
-            )
+        # One automatic reply per chat per 24 hours
+        if now - previous < COOLDOWN:
+            logger.info("24-hour cooldown active for chat %s", chat_id)
             return
 
-        # Set cooldown only after a successful send
+        # Send from the PERSONAL Telegram account
         await event.respond(AUTO_REPLY)
         last_replied[chat_id] = time.time()
 
-        logger.info(
-            "Auto-reply sent successfully to chat %s",
-            chat_id,
-        )
+        logger.info("Personal account auto-reply sent to chat %s", chat_id)
 
     except Exception:
-        logger.exception("Personal DM auto-reply failed")
+        logger.exception("Personal account DM handler failed")
 
 
-# ---------- MAIN ----------
+# ========== RUN ==========
 
 async def main():
-    # BotFather bot
-    bot_app = Application.builder().token(BOT_TOKEN).build()
-    bot_app.add_handler(
-        CommandHandler("start", start_command)
-    )
+    global auto_reply_enabled
 
-    # Personal Telegram account
-    user_client = TelegramClient(
+    bot = Application.builder().token(BOT_TOKEN).build()
+
+    bot.add_handler(CommandHandler("start", start_cmd))
+    bot.add_handler(CommandHandler("stop", stop_cmd))
+    bot.add_handler(CommandHandler("on", on_cmd))
+
+    client = TelegramClient(
         StringSession(STRING_SESSION),
         API_ID,
         API_HASH,
     )
 
-    await user_client.start()
+    await client.start()
 
-    me = await user_client.get_me()
-    logger.info(
-        "Personal Telegram account connected: ID %s",
-        me.id,
-    )
+    me = await client.get_me()
+    logger.info("Personal account connected. ID: %s", me.id)
 
-    # Register incoming private message handler
-    user_client.add_event_handler(
-        handle_private_message,
+    client.add_event_handler(
+        handle_dm,
         events.NewMessage(incoming=True),
     )
 
-    await bot_app.initialize()
-    await bot_app.start()
+    await bot.initialize()
+    await bot.start()
 
-    if bot_app.updater is None:
-        raise RuntimeError("Telegram polling updater unavailable")
+    if bot.updater is None:
+        raise RuntimeError("Bot polling is unavailable")
 
-    await bot_app.updater.start_polling()
+    await bot.updater.start_polling()
 
-    logger.info("Demon Secretary Bot started successfully.")
+    logger.info("Demon Secretary started successfully.")
 
     try:
-        await user_client.run_until_disconnected()
+        await client.run_until_disconnected()
     finally:
-        await bot_app.updater.stop()
-        await bot_app.stop()
-        await bot_app.shutdown()
-        await user_client.disconnect()
+        await bot.updater.stop()
+        await bot.stop()
+        await bot.shutdown()
+        await client.disconnect()
 
 
 if __name__ == "__main__":
-    threading.Thread(
-        target=run_web_server,
-        daemon=True,
-    ).start()
-
+    threading.Thread(target=run_web, daemon=True).start()
     asyncio.run(main())
